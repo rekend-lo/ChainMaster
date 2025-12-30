@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>ChainMaster Pro Custom UI</title>
+    <style>
+        :root { --cyan: #00f2ff; --gold: #ffcc00; --red: #ff4444; }
+        body { background: #020205; color: white; font-family: 'Segoe UI', sans-serif; margin: 0; height: 100vh; overflow: hidden; display: flex; justify-content: center; align-items: center; touch-action: none; }
+        canvas { background: #050510; border-radius: 40px; border: 2px solid #334155; touch-action: none; z-index: 10; box-shadow: 0 0 50px rgba(0,0,0,0.8); }
+        
+        .ui { position: absolute; z-index: 20; display: flex; flex-direction: column; align-items: center; width: 100%; top: 15px; pointer-events: none; }
+        .stats { display: flex; gap: 5px; flex-wrap: wrap; justify-content: center; }
+        .card { background: rgba(255,255,255,0.07); padding: 8px 10px; border-radius: 12px; text-align: center; backdrop-filter: blur(15px); min-width: 70px; border: 1px solid rgba(255,255,255,0.1); }
+        .num { font-size: 18px; font-weight: 900; display: block; }
+        .txt { font-size: 7px; opacity: 0.5; text-transform: uppercase; letter-spacing: 1px; }
+
+        #boost-btn { 
+            position: absolute; bottom: 40px; display: none; pointer-events: all;
+            background: linear-gradient(45deg, var(--gold), #ff8800); color: black;
+            border: none; padding: 18px 45px; border-radius: 50px; font-weight: 900;
+            font-size: 20px; box-shadow: 0 0 30px var(--gold); animation: pulse 1s infinite; cursor: pointer;
+        }
+        @keyframes pulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.05); } }
+        #fever-timer { font-size: 40px; font-weight: 900; color: var(--gold); display: none; text-shadow: 0 0 25px var(--gold); position: absolute; top: 130px; z-index: 30; }
+        
+        /* Игровые оверлеи */
+        .overlay { position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,0.95); display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; backdrop-filter: blur(10px); }
+        .title { font-size: 50px; font-weight: 900; margin: 0; background: linear-gradient(var(--cyan), #fff); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+        .btn-main { background: var(--cyan); color: black; padding: 15px 50px; border-radius: 30px; border: none; font-weight: 900; cursor: pointer; margin-top: 30px; font-size: 18px; transition: 0.2s; pointer-events: all; }
+        .btn-main:hover { transform: scale(1.1); box-shadow: 0 0 20px var(--cyan); }
+        
+        #game-over { display: none; }
+    </style>
+</head>
+<body>
+
+    <div id="fever-timer">30.0</div>
+
+    <div id="menu" class="overlay">
+        <h1 class="title">CHAIN MASTER</h1>
+        <p style="opacity: 0.5; letter-spacing: 5px;">ULTIMATE PUZZLE</p>
+        <button class="btn-main" onclick="initGame()">START GAME</button>
+    </div>
+
+    <div id="game-over" class="overlay">
+        <h1 style="color: var(--red); font-size: 45px; font-weight: 900;">GAME OVER</h1>
+        <div style="margin: 20px 0;">
+            <p style="opacity: 0.6; margin: 0;">FINAL SCORE</p>
+            <span id="final-score" style="font-size: 60px; font-weight: 900;">0</span>
+        </div>
+        <button class="btn-main" onclick="resetGame()">TRY AGAIN</button>
+    </div>
+
+    <div class="ui">
+        <div class="stats">
+            <div class="card"><span class="txt">Score</span><span id="score" class="num">0</span></div>
+            <div class="card"><span class="txt">Moves</span><span id="moves" class="num">15</span></div>
+            <div class="card"><span class="txt">Boost</span><span id="boost-prog" class="num">0%</span></div>
+            <div class="card"><span class="txt">Best</span><span id="best" class="num">0</span></div>
+        </div>
+    </div>
+
+    <canvas id="g"></canvas>
+    <button id="boost-btn" onclick="activateBoost()">GOLDEN BOOST</button>
+
+<script>
+const canvas = document.getElementById('g');
+const ctx = canvas.getContext('2d');
+const colors = ['#FF0055', '#00E5FF', '#00FF95', '#FFCC00', '#CC00FF', '#FF6600'];
+let SIZE = 6, CELL, RADIUS, dots = [], selected = [], score = 0, moves = 15, isBoost = false;
+let particles = [], bestScore = localStorage.getItem('cm_best') || 0;
+let audioCtx, boostOsc, boostFilter, boostTime = 0, scoreForBoost = 0, boostThreshold = 1000;
+let gameActive = false;
+
+document.getElementById('best').innerText = bestScore;
+
+function resize() {
+    const s = Math.min(window.innerWidth * 0.94, 400);
+    CELL = s / SIZE; RADIUS = CELL * 0.38;
+    canvas.width = s; canvas.height = s;
+}
+window.addEventListener('resize', resize);
+resize();
+
+function initAudio() { if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+
+function playSelect(idx) {
+    if (!audioCtx) return;
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = isBoost ? 'square' : 'sine';
+    osc.frequency.setValueAtTime(300 + (idx * 60), now);
+    g.gain.setValueAtTime(0.08, now);
+    g.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+    osc.connect(g); g.connect(audioCtx.destination);
+    osc.start(); osc.stop(now + 0.1);
+}
+
+function playPop() {
+    if (!audioCtx) return;
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(120, now);
+    g.gain.setValueAtTime(0.15, now);
+    g.gain.linearRampToValueAtTime(0, now + 0.1);
+    osc.connect(g); g.connect(audioCtx.destination);
+    osc.start(); osc.stop(now + 0.1);
+}
+
+function startBoostSound() {
+    if (!audioCtx) return;
+    boostOsc = audioCtx.createOscillator();
+    boostFilter = audioCtx.createBiquadFilter();
+    const g = audioCtx.createGain();
+    boostOsc.type = 'sine';
+    boostOsc.frequency.setValueAtTime(45, audioCtx.currentTime);
+    boostFilter.type = 'lowpass';
+    boostFilter.frequency.setValueAtTime(150, audioCtx.currentTime);
+    g.gain.setValueAtTime(0.12, audioCtx.currentTime);
+    boostOsc.connect(boostFilter); boostFilter.connect(g); g.connect(audioCtx.destination);
+    boostOsc.start();
+}
+
+function spawnParticles(x, y, color) {
+    for(let i=0; i<10; i++) {
+        particles.push({ x, y, color, vx: (Math.random()-0.5)*14, vy: (Math.random()-0.5)*14, life: 1, size: Math.random()*3 + 2 });
+    }
+}
+
+function gameLoop() {
+    if (!gameActive) return;
+    if (isBoost) {
+        boostTime -= 1/60;
+        document.getElementById('fever-timer').innerText = Math.max(0, boostTime).toFixed(1);
+        if (boostTime <= 0) endBoost();
+    }
+    for(let i=particles.length-1; i>=0; i--) {
+        particles[i].x += particles[i].vx;
+        particles[i].y += particles[i].vy;
+        particles[i].life -= 0.035;
+        if(particles[i].life <= 0) particles.splice(i, 1);
+    }
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+function draw() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (selected.length > 1) {
+        ctx.beginPath();
+        ctx.strokeStyle = isBoost ? 'gold' : dots[selected[0].r][selected[0].c];
+        ctx.lineWidth = 14; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+        selected.forEach((p, i) => {
+            const x = p.c * CELL + CELL/2, y = p.r * CELL + CELL/2;
+            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+    }
+    for(let r=0; r<SIZE; r++) {
+        for(let c=0; c<SIZE; c++) {
+            if(!dots[r][c]) continue;
+            const isS = selected.some(d => d.r === r && d.c === c);
+            const x = c * CELL + CELL/2, y = r * CELL + CELL/2;
+            ctx.beginPath();
+            ctx.arc(x, y, isS ? RADIUS*1.2 : RADIUS, 0, Math.PI*2);
+            ctx.fillStyle = dots[r][c];
+            ctx.fill();
+            if(isS) { ctx.strokeStyle = 'white'; ctx.lineWidth = 4; ctx.stroke(); }
+        }
+    }
+    particles.forEach(p => {
+        ctx.globalAlpha = p.life; ctx.fillStyle = p.color;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
+    });
+    ctx.globalAlpha = 1;
+}
+
+function initGame() {
+    initAudio();
+    gameActive = true;
+    document.getElementById('menu').style.display = 'none';
+    document.getElementById('game-over').style.display = 'none';
+    dots = Array.from({length: SIZE}, () => Array.from({length: SIZE}, () => colors[Math.floor(Math.random()*colors.length)]));
+    requestAnimationFrame(gameLoop);
+}
+
+function resetGame() {
+    score = 0; moves = 15; scoreForBoost = 0; boostThreshold = 1000;
+    updateUI();
+    initGame();
+}
+
+function handlePointer(e) {
+    if (!gameActive) return;
+    if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX || (e.touches && e.touches[0].clientX)) - rect.left;
+    const y = (e.clientY || (e.touches && e.touches[0].clientY)) - rect.top;
+    const r = Math.floor(y / CELL), c = Math.floor(x / CELL);
+    if (r < 0 || r >= SIZE || c < 0 || c >= SIZE) return;
+
+    if (e.type === 'pointerdown' || e.type === 'touchstart') {
+        selected = [{r, c}];
+        playSelect(0);
+    } else if (selected.length > 0) {
+        const last = selected[selected.length - 1];
+        if (last.r === r && last.c === c) return;
+        const dist = Math.sqrt(Math.pow(r - last.r, 2) + Math.pow(c - last.c, 2));
+        if (dist < 1.8 && (isBoost || dots[r][c] === dots[last.r][last.c]) && !selected.some(d => d.r === r && d.c === c)) {
+            selected.push({r, c});
+            playSelect(selected.length);
+        }
+    }
+}
+
+function processMove(isLoop) {
+    if (selected.length < 2 && !isLoop) return;
+    playPop();
+    const turnPoints = isLoop ? 500 : selected.length * 25;
+    if (!isBoost) {
+        scoreForBoost += turnPoints;
+        moves += (isLoop ? 3 : (selected.length >= 4 ? 0 : -1));
+    }
+    score += turnPoints;
+    const col = dots[selected[0].r][selected[0].c];
+    selected.forEach(p => {
+        spawnParticles(p.c * CELL + CELL/2, p.r * CELL + CELL/2, dots[p.r][p.c]);
+        if (!isLoop) dots[p.r][p.c] = null;
+    });
+    if (isLoop) {
+        for(let r=0; r<SIZE; r++) for(let c=0; c<SIZE; c++) if (dots[r][c] === col || isBoost) { 
+            spawnParticles(c*CELL+CELL/2, r*CELL+CELL/2, dots[r][c]); 
+            dots[r][c] = null; 
+        }
+    }
+    setTimeout(refill, 50);
+}
+
+function refill() {
+    for(let c=0; c<SIZE; c++) {
+        let e = SIZE - 1;
+        for(let r=SIZE-1; r>=0; r--) if(dots[r][c]) { dots[e][c] = dots[r][c]; if(e!==r) dots[r][c]=null; e--; }
+        for(let r=e; r>=0; r--) dots[r][c] = isBoost ? 'gold' : colors[Math.floor(Math.random()*colors.length)];
+    }
+    updateUI();
+}
+
+function updateUI() {
+    document.getElementById('score').innerText = score;
+    document.getElementById('moves').innerText = isBoost ? '∞' : moves;
+    const moveEl = document.getElementById('moves');
+    moveEl.style.color = (moves <= 3 && !isBoost) ? 'red' : 'white';
+
+    if (score > bestScore) { bestScore = score; document.getElementById('best').innerText = bestScore; localStorage.setItem('cm_best', bestScore); }
+    const prog = Math.min(100, Math.floor((scoreForBoost / boostThreshold) * 100));
+    document.getElementById('boost-prog').innerText = isBoost ? "ON" : prog + "%";
+    
+    document.getElementById('boost-btn').style.display = (!isBoost && scoreForBoost >= boostThreshold) ? 'block' : 'none';
+
+    if (moves <= 0 && !isBoost) { 
+        gameActive = false;
+        document.getElementById('final-score').innerText = score;
+        document.getElementById('game-over').style.display = 'flex';
+    }
+}
+
+function activateBoost() {
+    isBoost = true; boostTime = 30.0;
+    startBoostSound();
+    document.getElementById('fever-timer').style.display = 'block';
+    for(let r=0; r<SIZE; r++) for(let c=0; c<SIZE; c++) dots[r][c] = 'gold';
+    updateUI();
+}
+
+function endBoost() {
+    isBoost = false;
+    scoreForBoost = 0;
+    boostThreshold += 500;
+    if (boostOsc) { try { boostOsc.stop(); } catch(e){} boostOsc = null; }
+    document.getElementById('fever-timer').style.display = 'none';
+    moves = 15;
+    for(let r=0; r<SIZE; r++) for(let c=0; c<SIZE; c++) dots[r][c] = colors[Math.floor(Math.random()*colors.length)];
+    updateUI();
+}
+
+window.addEventListener('pointerup', () => { if(selected.length >= 2) processMove(false); selected = []; });
+canvas.addEventListener('pointerdown', handlePointer);
+window.addEventListener('pointermove', handlePointer);
+</script>
+</body>
+</html>
